@@ -1,0 +1,32 @@
+[project]
+name = "ai-code-review-framework-pilot"
+version = "0.1.0"
+description = "Reference implementation of the AI code review measurement framework"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.5",
+    "numpy>=1.26",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+]
+api = [
+    "anthropic>=0.30",
+    "openai>=1.30",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
