@@ -107,22 +107,74 @@ def load_dataset(args: argparse.Namespace) -> tuple[list, str]:
         (list of PullRequest, evaluation set name)
     """
     if args.benchmark:
-        if args.benchmark == "ccrab":
-            from pilot.datasets.ccrab import load_ccrab, get_dataset_stats
-
-            benchmark_path = Path(args.benchmark_path)
-            prs = load_ccrab(
-                benchmark_path,
-                max_diff_chars=args.max_diff_chars,
-            )
-            stats = get_dataset_stats(prs)
-            print(f"Loaded c-CRAB: {stats['n_prs']} PRs, "
-                  f"{stats['n_ground_truth_issues']} GT issues, "
-                  f"median diff {stats['diff_length_median']} chars")
-            print(f"Change types: {stats['change_type_distribution']}")
-            return prs, f"ccrab-{stats['n_prs']}prs"
-        raise ValueError(f"Unknown benchmark: {args.benchmark}")
+        return _load_benchmark(args)
     return load_pull_requests(args.dataset), args.dataset.name
+
+
+def _load_benchmark(args: argparse.Namespace) -> tuple[list, str]:
+    """Load a named benchmark dataset."""
+    benchmark = args.benchmark
+    path = Path(args.benchmark_path) if args.benchmark_path else None
+    max_diff = args.max_diff_chars
+
+    if benchmark == "ccrab":
+        from pilot.datasets.ccrab import load_ccrab, get_dataset_stats
+        if path is None:
+            raise ValueError("--benchmark-path is required for c-CRAB")
+        prs = load_ccrab(path, max_diff_chars=max_diff)
+        stats = get_dataset_stats(prs)
+
+    elif benchmark == "swe-prbench":
+        from pilot.datasets.swe_prbench import load_swe_prbench, get_dataset_stats
+        prs = load_swe_prbench(local_path=path, max_diff_chars=max_diff)
+        stats = get_dataset_stats(prs)
+
+    elif benchmark == "swe-care":
+        from pilot.datasets.swe_care import load_swe_care, get_dataset_stats
+        prs = load_swe_care(local_path=path, max_diff_chars=max_diff)
+        stats = get_dataset_stats(prs)
+
+    elif benchmark == "greptile":
+        from pilot.datasets.greptile import load_greptile, get_dataset_stats
+        if path is None:
+            raise ValueError("--benchmark-path is required for Greptile")
+        prs = load_greptile(path, max_diff_chars=max_diff)
+        stats = get_dataset_stats(prs)
+
+    elif benchmark == "martian":
+        from pilot.datasets.martian import load_martian, get_dataset_stats
+        if path is None:
+            raise ValueError("--benchmark-path is required for Martian")
+        prs = load_martian(path, max_diff_chars=max_diff)
+        stats = get_dataset_stats(prs)
+
+    elif benchmark == "all":
+        # Composite: load all available benchmarks
+        all_prs: list = []
+        sources: list[str] = []
+        for sub in ["ccrab", "swe-prbench", "swe-care", "greptile", "martian"]:
+            try:
+                sub_args = argparse.Namespace(**vars(args))
+                sub_args.benchmark = sub
+                sub_prs, sub_name = _load_benchmark(sub_args)
+                all_prs.extend(sub_prs)
+                sources.append(f"{sub}({len(sub_prs)})")
+            except (ImportError, FileNotFoundError, ValueError) as e:
+                print(f"Skipping {sub}: {e}")
+                continue
+        if not all_prs:
+            raise ValueError("No benchmarks could be loaded")
+        print(f"Composite: {len(all_prs)} PRs from {', '.join(sources)}")
+        return all_prs, f"composite-{len(all_prs)}prs"
+
+    else:
+        raise ValueError(f"Unknown benchmark: {benchmark}")
+
+    print(f"Loaded {benchmark}: {stats['n_prs']} PRs, "
+          f"{stats['n_ground_truth_issues']} GT issues, "
+          f"median diff {stats['diff_length_median']} chars")
+    print(f"Change types: {stats['change_type_distribution']}")
+    return prs, f"{benchmark}-{stats['n_prs']}prs"
 
 
 def run_pipeline(
@@ -233,9 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     # Benchmark loading
     parser.add_argument(
         "--benchmark",
-        choices=["ccrab"],
+        choices=["ccrab", "swe-prbench", "swe-care", "greptile", "martian", "all"],
         default=None,
-        help="Named benchmark to load. If set, --dataset is ignored.",
+        help="Named benchmark to load (or 'all' for composite). If set, --dataset is ignored.",
     )
     parser.add_argument(
         "--benchmark-path",
