@@ -4,15 +4,14 @@ Usage:
     # Mock mode (no API costs)
     python -m pilot.run --dataset fixtures/sample.jsonl
 
-    # Real mode (requires ANTHROPIC_API_KEY and/or OPENAI_API_KEY in env)
-    python -m pilot.run --dataset fixtures/sample.jsonl \\
-        --reviewer anthropic \\
-        --judge anthropic,openai
+    # c-CRAB benchmark (real data, no API cost for loading)
+    python -m pilot.run --benchmark ccrab \\
+        --benchmark-path /path/to/ccrab/results_preprocessed/preprocess_dataset.jsonl \\
+        --reviewer anthropic --judge anthropic
 
-    # Custom models
+    # Real mode on fixtures
     python -m pilot.run --dataset fixtures/sample.jsonl \\
-        --reviewer anthropic --reviewer-model claude-sonnet-4-6 \\
-        --judge anthropic --judge-models claude-opus-4-6
+        --reviewer anthropic --judge anthropic,openai
 
 The pilot runs in mock mode by default. Real mode uses the AnthropicReviewer,
 AnthropicJudge, and OpenAIJudge adapters (see api_adapters.py).
@@ -101,8 +100,33 @@ def build_judge(args: argparse.Namespace) -> Judge:
     return JudgePanel(judges)
 
 
+def load_dataset(args: argparse.Namespace) -> tuple[list, str]:
+    """Load PRs from either a fixture file or a named benchmark.
+
+    Returns:
+        (list of PullRequest, evaluation set name)
+    """
+    if args.benchmark:
+        if args.benchmark == "ccrab":
+            from pilot.datasets.ccrab import load_ccrab, get_dataset_stats
+
+            benchmark_path = Path(args.benchmark_path)
+            prs = load_ccrab(
+                benchmark_path,
+                max_diff_chars=args.max_diff_chars,
+            )
+            stats = get_dataset_stats(prs)
+            print(f"Loaded c-CRAB: {stats['n_prs']} PRs, "
+                  f"{stats['n_ground_truth_issues']} GT issues, "
+                  f"median diff {stats['diff_length_median']} chars")
+            print(f"Change types: {stats['change_type_distribution']}")
+            return prs, f"ccrab-{stats['n_prs']}prs"
+        raise ValueError(f"Unknown benchmark: {args.benchmark}")
+    return load_pull_requests(args.dataset), args.dataset.name
+
+
 def run_pipeline(
-    dataset_path: Path,
+    prs: list,
     reviewer: Reviewer,
     judge: Judge,
     evaluation_set_name: str,
@@ -110,13 +134,11 @@ def run_pipeline(
     """Run the full evaluation pipeline.
 
     Steps:
-    1. Load PRs with ground truth from dataset.
-    2. For each PR, run the reviewer to produce findings.
-    3. For each PR, use the judge to match findings to ground truth.
-    4. Compute precision, recall, F1 per dimension and aggregate.
-    5. Return the metrics report.
+    1. For each PR, run the reviewer to produce findings.
+    2. For each PR, use the judge to match findings to ground truth.
+    3. Compute precision, recall, F1 per dimension and aggregate.
+    4. Return the metrics report.
     """
-    prs = load_pull_requests(dataset_path)
     findings_by_pr: dict[str, list] = {}
     outcomes: list[MatchingOutcome] = []
 
@@ -160,8 +182,7 @@ def run_pipeline(
         judge_panel=judge_panel,
         evaluation_set=evaluation_set_name,
         run_metadata={
-            "dataset_path": str(dataset_path),
-            "pilot_version": "0.2.0",
+            "pilot_version": "0.3.0",
             **usage_metadata,
         },
     )
@@ -209,6 +230,31 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("fixtures/mock_judge_matches.jsonl"),
         help="Fixture file for mock judge.",
     )
+    # Benchmark loading
+    parser.add_argument(
+        "--benchmark",
+        choices=["ccrab"],
+        default=None,
+        help="Named benchmark to load. If set, --dataset is ignored.",
+    )
+    parser.add_argument(
+        "--benchmark-path",
+        type=Path,
+        default=None,
+        help="Path to the benchmark data file (required when --benchmark is set).",
+    )
+    parser.add_argument(
+        "--max-diff-chars",
+        type=int,
+        default=50_000,
+        help="Truncate diffs longer than this many characters (default: 50000).",
+    )
+    parser.add_argument(
+        "--max-prs",
+        type=int,
+        default=None,
+        help="Limit the number of PRs to evaluate (for cost control).",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -222,14 +268,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    prs, eval_set_name = load_dataset(args)
+    if args.max_prs is not None:
+        prs = prs[:args.max_prs]
+        print(f"Limited to first {args.max_prs} PRs")
+
     reviewer = build_reviewer(args)
     judge = build_judge(args)
 
     report = run_pipeline(
-        dataset_path=args.dataset,
+        prs=prs,
         reviewer=reviewer,
         judge=judge,
-        evaluation_set_name=args.dataset.name,
+        evaluation_set_name=eval_set_name,
     )
 
     json_path = args.output_dir / f"{args.name}.json"
