@@ -50,39 +50,124 @@ The pilot runs in mock mode by default, with no API costs. See `pilot/README.md`
 
 ```
 .
-├── README.md                          # This file
-├── LICENSE                            # Apache 2.0
+├── README.md
+├── LICENSE                                # Apache 2.0
 ├── framework/
-│   └── measurement_framework.md       # The framework specification
+│   └── measurement_framework.md           # The framework specification (5,100+ lines)
 ├── research/
-│   └── literature_review.md           # Literature synthesis
+│   └── literature_review.md               # Literature synthesis (80+ papers)
 ├── paper/
-│   └── part1_paper.md                 # Part 1: Measuring AI Code Review Quality
+│   └── part1_paper.md                     # Part 1 research paper
 └── pilot/
-    ├── README.md                      # Pilot setup and usage
-    ├── pyproject.toml                 # Dependencies
-    ├── src/pilot/                     # Source code
-    │   ├── schemas.py                 # Pydantic models
-    │   ├── data.py                    # JSONL loaders
-    │   ├── reviewer.py                # Abstract Reviewer + MockReviewer
-    │   ├── judge.py                   # Abstract Judge + MockJudge
-    │   ├── api_adapters.py            # AnthropicReviewer, AnthropicJudge, OpenAIJudge
-    │   ├── panel.py                   # JudgePanel with majority vote
-    │   ├── prompts.py                 # Prompt templates
-    │   ├── matching.py                # Semantic matching
-    │   ├── metrics.py                 # Precision, recall, F1, Wilson CIs
-    │   ├── reporting.py               # JSON + Markdown reports
-    │   └── run.py                     # CLI orchestration
-    ├── tests/                         # Unit and integration tests
-    └── fixtures/                      # 10-PR sample dataset
+    ├── README.md                          # Pilot setup and usage
+    ├── pyproject.toml                     # Dependencies
+    ├── src/pilot/
+    │   ├── schemas.py                     # 15-dimension taxonomy, 4-level severity, data models
+    │   ├── data.py                        # JSONL loaders
+    │   ├── reviewer.py                    # Abstract Reviewer + MockReviewer
+    │   ├── judge.py                       # Abstract Judge + MockJudge
+    │   ├── api_adapters.py                # AnthropicReviewer, AnthropicJudge, OpenAIJudge
+    │   ├── panel.py                       # JudgePanel with majority vote
+    │   ├── prompts.py                     # Prompt templates for reviewer and judge
+    │   ├── matching.py                    # Semantic matching between findings and GT
+    │   ├── metrics.py                     # Precision, recall, F1, Wilson CIs, dimension accuracy
+    │   ├── reporting.py                   # JSON + Markdown reports
+    │   ├── run.py                         # Benchmark CLI orchestration
+    │   ├── autoresearch.py                # AutoResearch iteration loop for prompt optimisation
+    │   ├── classify.py                    # Dimension classifier CLI (AutoResearch-powered)
+    │   ├── dimension_pipeline.py          # Multi-run consensus classification pipeline
+    │   └── datasets/                      # Public benchmark adapters
+    │       ├── ccrab.py                   # c-CRAB (410 PRs, Python, test-based GT)
+    │       ├── swe_prbench.py             # SWE-PRBench (350 PRs, 5 languages)
+    │       ├── swe_care.py                # SWE-CARE (671 instances, 9 domains)
+    │       ├── greptile.py                # Greptile (50 PRs, real traced bugs)
+    │       └── martian.py                 # Martian (50 PRs, severity labels)
+    ├── tests/                             # 78 unit and integration tests
+    └── fixtures/                          # 10-PR sample dataset for mock mode
 ```
+
+## Supported benchmarks
+
+Five public benchmark datasets are supported out of the box:
+
+| Benchmark | PRs | Languages | Ground truth | Unique value |
+|---|---|---|---|---|
+| **c-CRAB** | 410 | Python | Test-based (deterministic) | Ground truth you can't argue with |
+| **SWE-PRBench** | 350 | Python, JS, Go, TS, Java | Human review comments | Multi-language, contamination-aware |
+| **SWE-CARE** | 671 | Python, Java | Multi-faceted, 9 domains | Category-level analysis |
+| **Greptile** | 50 | 5 languages | Real traced bugs | Bugs that actually shipped |
+| **Martian** | 50 | 5 languages | Golden comments + severity | Pre-labelled severity |
+
+Load any benchmark with `--benchmark`:
+
+```bash
+python -m pilot.run --benchmark ccrab \
+    --benchmark-path /path/to/preprocess_dataset.jsonl \
+    --reviewer anthropic --judge openai \
+    --name my-run
+```
+
+Or load all available benchmarks at once with `--benchmark all`.
+
+## Authentication
+
+Three ways to authenticate LLM calls, no configuration files needed:
+
+**Claude Code (subscription, no API key):**
+```bash
+# Uses your logged-in Claude Code session via `claude -p`
+python -m pilot.run --benchmark ccrab \
+    --benchmark-path /path/to/data \
+    --reviewer claude-code --judge claude-code
+```
+Works if you can use Claude Code. No environment variables needed.
+
+**Anthropic API key:**
+```bash
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+python -m pilot.run --reviewer anthropic --judge anthropic
+```
+
+**OpenAI API key:**
+```bash
+export OPENAI_API_KEY=sk-proj-...
+python -m pilot.run --judge openai
+```
+
+For cross-family evaluation (the framework recommends judging with a different model family than the reviewer), combine providers:
+
+```bash
+python -m pilot.run --reviewer anthropic --judge openai
+```
+
+## Dimension classification pipeline
+
+Ground truth issues in public benchmarks are not classified by the framework's 15 dimensions. The classification pipeline uses multi-run LLM consensus to classify them:
+
+```bash
+# Classify with Opus × 3 runs (uses Claude Code subscription)
+python -m pilot.dimension_pipeline classify \
+    --benchmark ccrab \
+    --benchmark-path /path/to/data \
+    --providers claude-code --models claude-opus-4-6 \
+    --runs 3 --output classified/ccrab.jsonl
+
+# Review the auto-generated spot-check sample (50 examples)
+# Open spot-check-50.jsonl, fill in human_dimension for each
+
+# Validate AI labels against your spot-check
+python -m pilot.dimension_pipeline validate \
+    --classified classified/ccrab.jsonl \
+    --human-labels spot-check/ccrab-50-labelled.jsonl
+```
+
+If kappa ≥ 0.70: classifications are reliable, proceed to the benchmark run.
 
 ## Extending or reproducing
 
-If you want to use this framework:
-
-- **Apply it to your own tool.** Fork the pilot, swap `MockReviewer` for an adapter that wraps your tool's API, and run the pipeline on a benchmark that matters to you.
-- **Build a new benchmark.** The pilot's data loader expects a JSONL format with the schema defined in `pilot/src/pilot/schemas.py`. Adapt existing benchmarks (c-CRAB, SWE-PRBench) to this format, or curate your own.
+- **Apply it to your own tool.** Swap `MockReviewer` for an adapter wrapping your tool's API, point at a benchmark, run.
+- **Add a new benchmark.** Write an adapter in `pilot/src/pilot/datasets/` following the c-CRAB pattern, or prepare your data as JSONL matching the schema in `schemas.py`.
+- **Run on proprietary code.** The pipeline works on any JSONL dataset with the right schema. Point it at your own PRs with your own review comments as ground truth.
 - **Extend the framework.** Revisions belong in `framework/measurement_framework.md` first, then propagate to the pilot code and the paper.
 
 ## Licence
