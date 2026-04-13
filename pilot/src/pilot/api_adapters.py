@@ -38,6 +38,88 @@ from pilot.schemas import (
 logger = logging.getLogger(__name__)
 
 
+# --- Severity coercion -------------------------------------------------
+
+
+# Mapping from case-insensitive name strings to Severity enum values.
+_SEVERITY_NAME_MAP: dict[str, Severity] = {
+    member.name.lower(): member for member in Severity
+}
+
+
+def _coerce_severity(raw_value: Any) -> tuple[Severity, bool]:
+    """Coerce a raw severity value from LLM output into a Severity enum.
+
+    LLMs commonly return severity as strings ("3", "High", "critical")
+    rather than the expected integer. This function handles all reasonable
+    representations gracefully.
+
+    Returns:
+        A tuple of (severity, was_coerced). was_coerced is True if the
+        value required any transformation beyond a direct int lookup.
+        If all coercion fails, defaults to Severity.MEDIUM with a warning.
+    """
+    # Already a Severity instance — pass through.
+    if isinstance(raw_value, Severity):
+        return raw_value, False
+
+    # Integer — direct enum construction.
+    if isinstance(raw_value, int) and not isinstance(raw_value, bool):
+        try:
+            return Severity(raw_value), False
+        except ValueError:
+            logger.warning(
+                "Severity integer %d out of range [1-4], defaulting to MEDIUM",
+                raw_value,
+            )
+            return Severity.MEDIUM, True
+
+    # Float — accept if it's a whole number (e.g. 3.0 from JSON).
+    if isinstance(raw_value, float):
+        if raw_value == int(raw_value) and not (raw_value != raw_value):  # guard NaN
+            try:
+                return Severity(int(raw_value)), True
+            except ValueError:
+                pass
+        logger.warning(
+            "Severity float %r cannot be coerced, defaulting to MEDIUM",
+            raw_value,
+        )
+        return Severity.MEDIUM, True
+
+    # String — try numeric parse first, then name lookup.
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            logger.warning("Empty severity string, defaulting to MEDIUM")
+            return Severity.MEDIUM, True
+
+        # Numeric string ("3", "4").
+        try:
+            return Severity(int(stripped)), True
+        except (ValueError, KeyError):
+            pass
+
+        # Name string ("High", "critical", "MEDIUM").
+        normalised = stripped.lower()
+        if normalised in _SEVERITY_NAME_MAP:
+            return _SEVERITY_NAME_MAP[normalised], True
+
+        logger.warning(
+            "Unrecognised severity string %r, defaulting to MEDIUM",
+            raw_value,
+        )
+        return Severity.MEDIUM, True
+
+    # Anything else (None, dict, list, bool, etc.) — default.
+    logger.warning(
+        "Unexpected severity type %s (%r), defaulting to MEDIUM",
+        type(raw_value).__name__,
+        raw_value,
+    )
+    return Severity.MEDIUM, True
+
+
 # --- Protocols for dependency injection ---------------------------------
 
 
@@ -67,6 +149,9 @@ class UsageRecord:
     output_tokens: int = 0
     call_count: int = 0
     errors: int = 0
+    severity_coercions: int = 0
+    severity_coercion_failures: int = 0
+    total_findings_parsed: int = 0
 
     def record(self, input_tokens: int, output_tokens: int) -> None:
         self.input_tokens += input_tokens
@@ -76,6 +161,13 @@ class UsageRecord:
     def record_error(self) -> None:
         self.errors += 1
         self.call_count += 1
+
+    @property
+    def severity_coercion_rate(self) -> float:
+        """Proportion of parsed findings that required severity coercion."""
+        if self.total_findings_parsed == 0:
+            return 0.0
+        return self.severity_coercions / self.total_findings_parsed
 
 
 # --- Response parsing ---------------------------------------------------
@@ -106,10 +198,14 @@ def parse_reviewer_findings(
     response_text: str,
     pr_id: str,
     reviewer_model: str,
+    usage: UsageRecord | None = None,
 ) -> list[ReviewerFinding]:
     """Parse a reviewer API response into ReviewerFinding objects.
 
     Expected format: {"findings": [{"location": {...}, "dimension": "...", "severity": N, "comment": "..."}, ...]}
+
+    When a UsageRecord is provided, severity coercion events are tracked
+    on it so callers can monitor data quality.
     """
     data = _extract_json(response_text)
     if "findings" not in data:
@@ -117,13 +213,27 @@ def parse_reviewer_findings(
     findings: list[ReviewerFinding] = []
     for i, item in enumerate(data["findings"]):
         try:
+            severity, was_coerced = _coerce_severity(item.get("severity"))
+            if usage is not None:
+                usage.total_findings_parsed += 1
+                if was_coerced:
+                    usage.severity_coercions += 1
+                    # Track whether the coercion fell back to the default.
+                    original = item.get("severity")
+                    coerced_to_default = (
+                        severity == Severity.MEDIUM
+                        and not _is_intentional_medium(original)
+                    )
+                    if coerced_to_default:
+                        usage.severity_coercion_failures += 1
+
             finding = ReviewerFinding(
                 finding_id=f"{pr_id}-F{i+1:03d}",
                 pr_id=pr_id,
                 reviewer_model=reviewer_model,
                 location=Location.model_validate(item["location"]),
                 dimension=Dimension(item["dimension"]),
-                severity=Severity(item["severity"]),
+                severity=severity,
                 comment=item["comment"],
             )
             findings.append(finding)
@@ -133,6 +243,24 @@ def parse_reviewer_findings(
             )
             continue
     return findings
+
+
+def _is_intentional_medium(raw_value: Any) -> bool:
+    """Check whether the raw value genuinely represents MEDIUM.
+
+    Used to distinguish "coerced to default" from "legitimately MEDIUM".
+    """
+    if isinstance(raw_value, int) and not isinstance(raw_value, bool):
+        return raw_value == Severity.MEDIUM.value
+    if isinstance(raw_value, float):
+        return raw_value == float(Severity.MEDIUM.value)
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if stripped == str(Severity.MEDIUM.value):
+            return True
+        if stripped.lower() == "medium":
+            return True
+    return False
 
 
 def parse_judge_match(
@@ -216,7 +344,7 @@ class AnthropicReviewer(Reviewer):
         text = content_blocks[0].text if hasattr(content_blocks[0], "text") else ""
 
         try:
-            return parse_reviewer_findings(text, pr.pr_id, self.model_name)
+            return parse_reviewer_findings(text, pr.pr_id, self.model_name, usage=self.usage)
         except ValueError as e:
             logger.error("Failed to parse reviewer response for PR %s: %s", pr.pr_id, e)
             return []
@@ -239,6 +367,10 @@ class AnthropicJudge(Judge):
     @property
     def model_name(self) -> str:
         return f"anthropic/{self._model}"
+
+    @property
+    def family(self) -> str:
+        return "anthropic"
 
     def match_findings_to_ground_truth(
         self,
@@ -313,6 +445,10 @@ class OpenAIJudge(Judge):
     @property
     def model_name(self) -> str:
         return f"openai/{self._model}"
+
+    @property
+    def family(self) -> str:
+        return "openai"
 
     def match_findings_to_ground_truth(
         self,

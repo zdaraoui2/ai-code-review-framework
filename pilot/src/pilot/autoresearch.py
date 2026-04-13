@@ -309,15 +309,65 @@ def make_dimension_classify_fn(
 def make_dimension_evaluate_fn(
     calibration: list[DimensionLabel],
     client: LLMClient,
+    validation_fraction: float = 0.3,
+    split_seed: int = 42,
 ) -> Callable[[str], tuple[float, str]]:
     """Create an evaluation function for the dimension classifier loop.
 
-    Returns a callable with signature (prompt_str) -> (accuracy, error_analysis)
-    that the run_loop function expects.
+    Splits the calibration set into training (1 - validation_fraction) and
+    validation (validation_fraction) partitions using a deterministic shuffle
+    seeded by ``split_seed`` for reproducibility.
+
+    The returned callable classifies **validation** items to compute accuracy
+    (the score the loop optimises) and classifies **training** items to build
+    error analysis (confusion matrix and misclassified examples fed back to
+    the refiner). This prevents the refinement loop from overfitting to the
+    same data it is scored on.
+
+    Args:
+        calibration: Full set of human-labelled dimension examples.
+        client: LLM client used for classification calls.
+        validation_fraction: Fraction of calibration items reserved for
+            scoring. Defaults to 0.3 (30 %).
+        split_seed: Random seed for the deterministic shuffle. Defaults
+            to 42.
+
+    Returns:
+        A callable with signature (prompt_str) -> (accuracy, error_analysis)
+        that the run_loop function expects.
     """
+    import random as _random
+
+    rng = _random.Random(split_seed)
+    shuffled = list(calibration)
+    rng.shuffle(shuffled)
+
+    split_index = max(1, len(shuffled) - int(len(shuffled) * validation_fraction))
+    training_partition = shuffled[:split_index]
+    validation_partition = shuffled[split_index:]
+
+    if len(validation_partition) < 10:
+        logger.warning(
+            "Validation partition has only %d items — consider a larger calibration set",
+            len(validation_partition),
+        )
+
+    logger.info(
+        "Calibration split: %d training, %d validation (seed=%d, fraction=%.2f)",
+        len(training_partition), len(validation_partition), split_seed, validation_fraction,
+    )
+
     def evaluate(prompt: str) -> tuple[float, str]:
         classify_fn = make_dimension_classify_fn(prompt, client)
-        return evaluate_dimension_classifier(classify_fn, calibration)
+
+        # Score on validation partition only — the refiner never sees these.
+        accuracy, _ = evaluate_dimension_classifier(classify_fn, validation_partition)
+
+        # Build error analysis from training partition only — this is what
+        # the refiner receives as feedback.
+        _, error_analysis = evaluate_dimension_classifier(classify_fn, training_partition)
+
+        return accuracy, error_analysis
 
     return evaluate
 

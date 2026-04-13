@@ -7,10 +7,14 @@ delegates to multiple underlying judges and aggregates their results.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 
 from pilot.judge import Judge
 from pilot.schemas import MatchResult, PullRequest, ReviewerFinding
+
+
+logger = logging.getLogger(__name__)
 
 
 class JudgePanel(Judge):
@@ -24,22 +28,46 @@ class JudgePanel(Judge):
     - If all judges say no-match, the aggregate is no-match.
 
     The panel MUST contain at least 2 judges, and all judges MUST come from
-    different model families (per S8.1.1 — model family exclusion rule). The
-    panel does not enforce this — the caller is responsible for constructing
-    a valid panel.
+    different model families (per S8.1.1 — model family exclusion rule).
+    Set ``strict=False`` to downgrade the family check to a warning (useful
+    in tests where multiple MockJudge instances share a family).
     """
 
-    def __init__(self, judges: list[Judge]):
+    def __init__(self, judges: list[Judge], *, strict: bool = True):
         if len(judges) < 2:
             raise ValueError(
                 f"JudgePanel requires at least 2 judges, got {len(judges)}"
             )
+
+        # Enforce the model-family exclusion rule (S8.1.1).
+        families = [judge.family for judge in judges]
+        unique_families = set(families)
+        if len(unique_families) != len(judges):
+            duplicate_families = [
+                family for family in unique_families
+                if families.count(family) > 1
+            ]
+            message = (
+                f"JudgePanel requires judges from different model families "
+                f"(S8.1.1), but received duplicate families: "
+                f"{duplicate_families}. Got: {families}"
+            )
+            if strict:
+                raise ValueError(message)
+            logger.warning(message)
+
         self._judges = judges
 
     @property
     def model_name(self) -> str:
         names = [j.model_name for j in self._judges]
         return f"panel[{','.join(names)}]"
+
+    @property
+    def family(self) -> str:
+        """A panel spans multiple families; return a composite identifier."""
+        families = sorted({j.family for j in self._judges})
+        return f"panel[{','.join(families)}]"
 
     @property
     def judges(self) -> list[Judge]:

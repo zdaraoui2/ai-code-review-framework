@@ -296,8 +296,10 @@ def _convert_repo_entry(
     if not diff:
         diff = f"[Diff not available — fetch from {url}]"
 
-    if max_diff_chars is not None and len(diff) > max_diff_chars:
-        diff = diff[:max_diff_chars] + f"\n\n[... truncated at {max_diff_chars} chars ...]"
+    from pilot.datasets.truncation import truncate_diff, identify_excluded_gt_ids
+
+    truncation_result = truncate_diff(diff, max_diff_chars)
+    diff = truncation_result.diff
 
     # Ground truth from golden comments
     comments = entry.get("comments", [])
@@ -313,6 +315,12 @@ def _convert_repo_entry(
     if not ground_truth:
         return None
 
+    excluded_gt_ids = identify_excluded_gt_ids(
+        ground_truth,
+        truncation_result.last_visible_line,
+        truncation_result.truncated,
+    )
+
     return PullRequest(
         pr_id=pr_id,
         title=title[:200],
@@ -320,6 +328,9 @@ def _convert_repo_entry(
         change_type=change_type,
         diff=diff,
         ground_truth=ground_truth,
+        truncated=truncation_result.truncated,
+        original_diff_length=truncation_result.original_diff_length,
+        excluded_gt_ids=excluded_gt_ids,
     )
 
 
@@ -381,8 +392,10 @@ def _convert_jsonl_entry(
     if not diff:
         diff = "[Diff not provided]"
 
-    if max_diff_chars is not None and len(diff) > max_diff_chars:
-        diff = diff[:max_diff_chars] + f"\n\n[... truncated at {max_diff_chars} chars ...]"
+    from pilot.datasets.truncation import truncate_diff, identify_excluded_gt_ids
+
+    truncation_result = truncate_diff(diff, max_diff_chars)
+    diff = truncation_result.diff
 
     language = raw.get("language", "").lower()
     if not language:
@@ -404,6 +417,12 @@ def _convert_jsonl_entry(
     if not ground_truth:
         return None
 
+    excluded_gt_ids = identify_excluded_gt_ids(
+        ground_truth,
+        truncation_result.last_visible_line,
+        truncation_result.truncated,
+    )
+
     return PullRequest(
         pr_id=pr_id,
         title=title[:200],
@@ -411,6 +430,9 @@ def _convert_jsonl_entry(
         change_type=change_type,
         diff=diff,
         ground_truth=ground_truth,
+        truncated=truncation_result.truncated,
+        original_diff_length=truncation_result.original_diff_length,
+        excluded_gt_ids=excluded_gt_ids,
     )
 
 

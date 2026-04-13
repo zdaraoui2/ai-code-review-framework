@@ -133,6 +133,19 @@ class PullRequest(BaseModel):
     change_type: ChangeType
     diff: str
     ground_truth: list[GroundTruthIssue]
+    # Truncation metadata — populated by dataset adapters when the diff
+    # is clipped at max_diff_chars. Used to compute "visible recall" that
+    # excludes GT issues the reviewer could not possibly see.
+    truncated: bool = False
+    original_diff_length: int | None = None
+    excluded_gt_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "IDs of GT issues whose location falls past the truncation "
+            "point. These are NOT removed from ground_truth — they still "
+            "count toward total recall — but are excluded from visible recall."
+        ),
+    )
 
 
 class ReviewerFinding(BaseModel):
@@ -212,6 +225,38 @@ class DimensionMetrics(BaseModel):
     recall_ci: tuple[float, float] | None = None
 
 
+class ClaimedDimensionMetrics(BaseModel):
+    """Per-dimension metrics from the finding's (claimed) perspective.
+
+    In the GT-perspective table, TPs are attributed to the GT issue's dimension.
+    That is good for recall ("what fraction of concurrency bugs were found?")
+    but misleading for precision when dimension misclassification is common.
+
+    This model attributes TPs to the finding's claimed dimension instead,
+    giving an honest answer to "when the reviewer says concurrency, is it
+    right?" Only precision and the counts needed to compute it are tracked
+    here — recall is not meaningful from the claim perspective because
+    false negatives have no claimed dimension.
+    """
+
+    dimension: Dimension
+    tier: int
+    # Counts from the finding's perspective
+    true_positives: int = Field(
+        ..., description="Findings claiming this dimension that matched a GT issue."
+    )
+    false_positives: int = Field(
+        ..., description="Findings claiming this dimension that matched nothing."
+    )
+    total_claims: int = Field(
+        ..., description="Total findings claiming this dimension (TP + FP)."
+    )
+    precision: float | None = Field(
+        None, description="TP / (TP + FP) from the claim perspective. None when total_claims == 0."
+    )
+    precision_ci: tuple[float, float] | None = None
+
+
 class MetricsReport(BaseModel):
     """Complete metrics report for an evaluation run.
 
@@ -223,6 +268,9 @@ class MetricsReport(BaseModel):
     evaluation_set: str
     n_prs: int
     per_dimension: list[DimensionMetrics]
+    # Finding-perspective per-dimension breakdown (claimed dimension attribution).
+    # Answers "when the reviewer claims dimension X, how often is it correct?"
+    per_dimension_by_claim: list[ClaimedDimensionMetrics] = Field(default_factory=list)
     # Aggregate totals
     total_true_positives: int
     total_false_positives: int
@@ -241,6 +289,12 @@ class MetricsReport(BaseModel):
     dimension_classification_tp: int = 0
     dimension_classification_accuracy: float | None = None
     dimension_classification_accuracy_ci: tuple[float, float] | None = None
+    # Visible recall — excludes GT issues in truncated diff regions.
+    # None when no PRs were truncated (visible recall == total recall).
+    visible_recall: float | None = None
+    visible_recall_ci: tuple[float, float] | None = None
+    truncated_pr_count: int = 0
+    excluded_gt_issue_count: int = 0
     # Metadata
     framework_version: str = "1.0"
     run_metadata: dict[str, str] = Field(default_factory=dict)

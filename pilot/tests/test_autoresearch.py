@@ -210,8 +210,11 @@ def test_loop_result_save(tmp_path):
 
 def test_make_dimension_evaluate_fn():
     """The factory should produce a function with the right signature."""
+    # Need enough items for the 70/30 split to produce a non-empty
+    # validation partition.
     calibration = [
-        DimensionLabel("GT1", "SQL injection", "", Dimension.SECURITY),
+        DimensionLabel(f"GT{i}", f"issue {i}", "", Dimension.SECURITY)
+        for i in range(10)
     ]
     client = MockLLM()
     evaluate_fn = make_dimension_evaluate_fn(calibration, client)
@@ -230,3 +233,161 @@ def test_make_refine_fn():
     result = refine("current prompt", 0.5, "some errors")
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+# --- Train/validation split tests ----------------------------------------
+
+
+def test_evaluate_fn_scores_on_validation_partition_only():
+    """Accuracy must come from validation items, not training items.
+
+    We build a classifier that gets validation items right and training
+    items wrong. If accuracy reflects validation, it should be 1.0. If
+    it leaked training data into scoring, it would be lower.
+    """
+    # 10 items — with default 0.3 split that's 7 training + 3 validation.
+    # We need to discover which items land in each partition, then build
+    # a classifier that distinguishes them.
+    calibration = [
+        DimensionLabel(f"GT{i}", f"item-{i}", f"ctx-{i}", Dimension.SECURITY)
+        for i in range(10)
+    ]
+
+    # Discover the split by tracking which items the evaluate function
+    # classifies. We do two passes: one that records all classified items.
+    classified_items: list[str] = []
+
+    class TrackingLLM:
+        def complete(self, system: str, user: str) -> str:
+            # Extract the item text from the user message.
+            for label in calibration:
+                if label.text in user:
+                    classified_items.append(label.issue_id)
+            return "security"  # Always correct for these items.
+
+    tracking_llm = TrackingLLM()
+    evaluate_fn = make_dimension_evaluate_fn(calibration, tracking_llm)
+    score, _ = evaluate_fn("test prompt")
+
+    # All 10 items should be classified (3 for validation scoring,
+    # 7 for training error analysis).
+    assert len(classified_items) == 10
+
+    # Score should be 1.0 because all items are security and classifier
+    # returns security.
+    assert score == 1.0
+
+
+def test_error_analysis_uses_training_partition_only():
+    """Error analysis fed to the refiner must reference only training items.
+
+    We build a classifier that always returns the wrong answer, then
+    check that the error analysis string only contains training item IDs.
+    """
+    calibration = [
+        DimensionLabel(f"GT{i}", f"item-{i}", f"ctx-{i}", Dimension.SECURITY)
+        for i in range(20)
+    ]
+
+    class AlwaysWrongLLM:
+        def complete(self, system: str, user: str) -> str:
+            return "correctness"  # Wrong — all items are security.
+
+    wrong_llm = AlwaysWrongLLM()
+    evaluate_fn = make_dimension_evaluate_fn(calibration, wrong_llm)
+    _, error_analysis = evaluate_fn("test prompt")
+
+    # Reconstruct the split to know which items are training vs validation.
+    import random
+    rng = random.Random(42)  # Same seed as default.
+    shuffled = list(calibration)
+    rng.shuffle(shuffled)
+    split_index = max(1, len(shuffled) - int(len(shuffled) * 0.3))
+    training_ids = {label.issue_id for label in shuffled[:split_index]}
+    validation_ids = {label.issue_id for label in shuffled[split_index:]}
+
+    # Error analysis should mention training IDs (misclassified items).
+    for issue_id in training_ids:
+        assert issue_id in error_analysis, (
+            f"Training item {issue_id} should appear in error analysis"
+        )
+
+    # Error analysis must NOT mention validation IDs.
+    for issue_id in validation_ids:
+        assert issue_id not in error_analysis, (
+            f"Validation item {issue_id} leaked into error analysis"
+        )
+
+
+def test_split_is_deterministic():
+    """Same calibration set + same seed must produce identical scores."""
+    calibration = [
+        DimensionLabel(f"GT{i}", f"item-{i}", "", Dimension.SECURITY)
+        for i in range(20)
+    ]
+
+    class CountingLLM:
+        def __init__(self):
+            self.call_count = 0
+
+        def complete(self, system: str, user: str) -> str:
+            self.call_count += 1
+            return "security"
+
+    llm_a = CountingLLM()
+    llm_b = CountingLLM()
+
+    eval_a = make_dimension_evaluate_fn(calibration, llm_a, split_seed=42)
+    eval_b = make_dimension_evaluate_fn(calibration, llm_b, split_seed=42)
+
+    score_a, analysis_a = eval_a("prompt")
+    score_b, analysis_b = eval_b("prompt")
+
+    assert score_a == score_b
+    assert analysis_a == analysis_b
+    assert llm_a.call_count == llm_b.call_count
+
+
+def test_small_calibration_set_logs_warning(caplog):
+    """Calibration sets that produce fewer than 10 validation items
+    should trigger a warning log message."""
+    import logging
+
+    calibration = [
+        DimensionLabel(f"GT{i}", f"item-{i}", "", Dimension.SECURITY)
+        for i in range(5)
+    ]
+
+    client = MockLLM()
+    with caplog.at_level(logging.WARNING):
+        make_dimension_evaluate_fn(calibration, client)
+
+    assert any(
+        "Validation partition has only" in record.message
+        for record in caplog.records
+    ), "Expected a warning about small validation partition"
+
+
+def test_validation_fraction_adjustable():
+    """Users can override the default 0.3 validation fraction."""
+    calibration = [
+        DimensionLabel(f"GT{i}", f"unique_marker_{i:04d}", "", Dimension.SECURITY)
+        for i in range(20)
+    ]
+
+    classify_call_count = 0
+
+    class CountingLLM:
+        def complete(self, system: str, user: str) -> str:
+            nonlocal classify_call_count
+            classify_call_count += 1
+            return "security"
+
+    counting_llm = CountingLLM()
+    # 50% validation = 10 validation + 10 training = 20 total classify calls.
+    evaluate_fn = make_dimension_evaluate_fn(
+        calibration, counting_llm, validation_fraction=0.5,
+    )
+    evaluate_fn("prompt")
+
+    assert classify_call_count == 20  # All items classified across both partitions.

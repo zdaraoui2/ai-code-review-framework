@@ -10,6 +10,8 @@ from pilot.api_adapters import (
     AnthropicJudge,
     AnthropicReviewer,
     OpenAIJudge,
+    UsageRecord,
+    _coerce_severity,
     _extract_json,
     parse_judge_match,
     parse_reviewer_findings,
@@ -331,3 +333,268 @@ def test_openai_judge_handles_error():
     assert len(results) == 1
     assert results[0].finding_id is None  # Treated as no-match on error
     assert judge.usage.errors == 1
+
+
+# --- Severity coercion tests -------------------------------------------
+
+
+class TestCoerceSeverity:
+    """Tests for _coerce_severity covering all coercion paths."""
+
+    def test_int_no_coercion(self):
+        """Direct int should pass through without coercion."""
+        severity, was_coerced = _coerce_severity(3)
+        assert severity == Severity.HIGH
+        assert was_coerced is False
+
+    def test_severity_enum_passthrough(self):
+        """An existing Severity instance should pass through unchanged."""
+        severity, was_coerced = _coerce_severity(Severity.CRITICAL)
+        assert severity == Severity.CRITICAL
+        assert was_coerced is False
+
+    def test_int_out_of_range_defaults_to_medium(self):
+        """An int outside [1-4] should default to MEDIUM."""
+        severity, was_coerced = _coerce_severity(99)
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_float_whole_number(self):
+        """A whole-number float (3.0) should coerce to the matching int."""
+        severity, was_coerced = _coerce_severity(3.0)
+        assert severity == Severity.HIGH
+        assert was_coerced is True
+
+    def test_float_fractional_defaults_to_medium(self):
+        """A non-whole float (3.5) cannot map to an enum value."""
+        severity, was_coerced = _coerce_severity(3.5)
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_numeric_string(self):
+        """A numeric string like '3' should coerce to the matching int."""
+        severity, was_coerced = _coerce_severity("3")
+        assert severity == Severity.HIGH
+        assert was_coerced is True
+
+    def test_numeric_string_with_whitespace(self):
+        """Surrounding whitespace should be stripped before coercion."""
+        severity, was_coerced = _coerce_severity("  4  ")
+        assert severity == Severity.CRITICAL
+        assert was_coerced is True
+
+    def test_name_string_capitalised(self):
+        """'High' (title-case) should be looked up by name."""
+        severity, was_coerced = _coerce_severity("High")
+        assert severity == Severity.HIGH
+        assert was_coerced is True
+
+    def test_name_string_lowercase(self):
+        """'critical' (lowercase) should be looked up by name."""
+        severity, was_coerced = _coerce_severity("critical")
+        assert severity == Severity.CRITICAL
+        assert was_coerced is True
+
+    def test_name_string_uppercase(self):
+        """'MEDIUM' (uppercase) should be looked up by name."""
+        severity, was_coerced = _coerce_severity("MEDIUM")
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_name_string_low(self):
+        """'low' should map to Severity.LOW."""
+        severity, was_coerced = _coerce_severity("low")
+        assert severity == Severity.LOW
+        assert was_coerced is True
+
+    def test_unrecognised_string_defaults_to_medium(self):
+        """An unrecognised string should default to MEDIUM."""
+        severity, was_coerced = _coerce_severity("catastrophic")
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_empty_string_defaults_to_medium(self):
+        """An empty string should default to MEDIUM."""
+        severity, was_coerced = _coerce_severity("")
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_none_defaults_to_medium(self):
+        """None should default to MEDIUM."""
+        severity, was_coerced = _coerce_severity(None)
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_dict_defaults_to_medium(self):
+        """A dict should default to MEDIUM."""
+        severity, was_coerced = _coerce_severity({"level": 3})
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_list_defaults_to_medium(self):
+        """A list should default to MEDIUM."""
+        severity, was_coerced = _coerce_severity([3])
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+    def test_bool_defaults_to_medium(self):
+        """A bool should not be treated as int; it should default to MEDIUM."""
+        severity, was_coerced = _coerce_severity(True)
+        assert severity == Severity.MEDIUM
+        assert was_coerced is True
+
+
+class TestSeverityCoercionTracking:
+    """Tests that coercion events are recorded on the UsageRecord."""
+
+    def _make_response(self, severity_value) -> str:
+        """Build a minimal reviewer JSON response with a given severity value."""
+        import json
+        return json.dumps({
+            "findings": [{
+                "location": {"file_path": "a.py", "start_line": 1, "end_line": 1},
+                "dimension": "security",
+                "severity": severity_value,
+                "comment": "Test finding.",
+            }]
+        })
+
+    def test_int_severity_not_counted_as_coercion(self):
+        """A direct int severity should not increment the coercion counter."""
+        usage = UsageRecord()
+        response = self._make_response(4)
+        findings = parse_reviewer_findings(response, "PR1", "test", usage=usage)
+        assert len(findings) == 1
+        assert usage.severity_coercions == 0
+        assert usage.total_findings_parsed == 1
+
+    def test_string_severity_counted_as_coercion(self):
+        """A string severity should increment the coercion counter."""
+        usage = UsageRecord()
+        response = self._make_response("High")
+        findings = parse_reviewer_findings(response, "PR1", "test", usage=usage)
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.HIGH
+        assert usage.severity_coercions == 1
+        assert usage.severity_coercion_failures == 0
+
+    def test_invalid_string_counted_as_coercion_failure(self):
+        """An unrecognised string defaults to MEDIUM and counts as a failure."""
+        usage = UsageRecord()
+        response = self._make_response("catastrophic")
+        findings = parse_reviewer_findings(response, "PR1", "test", usage=usage)
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.MEDIUM
+        assert usage.severity_coercions == 1
+        assert usage.severity_coercion_failures == 1
+
+    def test_coercion_rate_calculation(self):
+        """The coercion rate should be coercions / total parsed findings."""
+        import json
+        usage = UsageRecord()
+        # Two findings: one int (no coercion), one string (coerced).
+        response = json.dumps({
+            "findings": [
+                {
+                    "location": {"file_path": "a.py", "start_line": 1, "end_line": 1},
+                    "dimension": "security",
+                    "severity": 4,
+                    "comment": "Direct int.",
+                },
+                {
+                    "location": {"file_path": "b.py", "start_line": 2, "end_line": 2},
+                    "dimension": "correctness",
+                    "severity": "High",
+                    "comment": "String severity.",
+                },
+            ]
+        })
+        findings = parse_reviewer_findings(response, "PR1", "test", usage=usage)
+        assert len(findings) == 2
+        assert usage.total_findings_parsed == 2
+        assert usage.severity_coercions == 1
+        assert usage.severity_coercion_rate == pytest.approx(0.5)
+
+    def test_coercion_rate_zero_when_no_findings(self):
+        """The rate should be 0.0 when no findings have been parsed."""
+        usage = UsageRecord()
+        assert usage.severity_coercion_rate == 0.0
+
+    def test_medium_string_not_counted_as_failure(self):
+        """'medium' genuinely means MEDIUM, so it's a coercion but not a failure."""
+        usage = UsageRecord()
+        response = self._make_response("medium")
+        findings = parse_reviewer_findings(response, "PR1", "test", usage=usage)
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.MEDIUM
+        assert usage.severity_coercions == 1
+        assert usage.severity_coercion_failures == 0
+
+
+# --- Reporting data quality warning tests ------------------------------
+
+
+class TestSeverityCoercionReportWarning:
+    """Tests that the Markdown report includes a warning when coercion rate is high."""
+
+    def test_warning_emitted_above_threshold(self):
+        from pilot.reporting import format_markdown_report
+        from pilot.schemas import MetricsReport
+
+        report = MetricsReport(
+            reviewer_model="test-model",
+            judge_panel=["test-judge"],
+            evaluation_set="test",
+            n_prs=1,
+            per_dimension=[],
+            total_true_positives=0,
+            total_false_positives=0,
+            total_false_negatives=0,
+            run_metadata={
+                "severity_coercion_rate": "25.00%",
+                "severity_coercion_count": "5",
+            },
+        )
+        markdown = format_markdown_report(report)
+        assert "Data Quality Warnings" in markdown
+        assert "25.00%" in markdown
+        assert "5 findings" in markdown
+
+    def test_no_warning_below_threshold(self):
+        from pilot.reporting import format_markdown_report
+        from pilot.schemas import MetricsReport
+
+        report = MetricsReport(
+            reviewer_model="test-model",
+            judge_panel=["test-judge"],
+            evaluation_set="test",
+            n_prs=1,
+            per_dimension=[],
+            total_true_positives=0,
+            total_false_positives=0,
+            total_false_negatives=0,
+            run_metadata={
+                "severity_coercion_rate": "10.00%",
+                "severity_coercion_count": "2",
+            },
+        )
+        markdown = format_markdown_report(report)
+        assert "Data Quality Warnings" not in markdown
+
+    def test_no_warning_when_no_coercion_metadata(self):
+        from pilot.reporting import format_markdown_report
+        from pilot.schemas import MetricsReport
+
+        report = MetricsReport(
+            reviewer_model="test-model",
+            judge_panel=["test-judge"],
+            evaluation_set="test",
+            n_prs=1,
+            per_dimension=[],
+            total_true_positives=0,
+            total_false_positives=0,
+            total_false_negatives=0,
+            run_metadata={},
+        )
+        markdown = format_markdown_report(report)
+        assert "Data Quality Warnings" not in markdown
