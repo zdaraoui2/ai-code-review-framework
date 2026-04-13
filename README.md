@@ -33,18 +33,46 @@ The framework introduces three contributions not present in any published code-r
 
 Read the Part 1 paper first (`paper/part1_paper.md`) for the motivation and high-level framework. Then read the framework specification (`framework/measurement_framework.md`) for implementation-level detail.
 
-To run the reference implementation:
+To run the reference implementation, follow these steps in order:
+
+**1. Install**
 
 ```bash
 cd pilot
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,benchmarks]"
+```
+
+**2. Verify with mock mode**
+
+```bash
 python -m pilot.run --dataset fixtures/sample.jsonl
 python -m pytest tests/ -v
 ```
 
-The pilot runs in mock mode by default, with no API costs. See `pilot/README.md` for instructions on running with real Anthropic and OpenAI adapters.
+This runs entirely offline with no API calls.
+
+**3. Get benchmark data**
+
+See [Getting benchmark data](#getting-benchmark-data) below for per-dataset instructions.
+
+**4. Classify dimensions**
+
+Ground truth issues in public benchmarks are not classified by the framework's 15 dimensions. Run the classification pipeline before benchmarking (see [Dimension classification pipeline](#dimension-classification-pipeline)).
+
+**5. Run a benchmark**
+
+```bash
+python -m pilot.run --benchmark ccrab \
+    --benchmark-path /path/to/preprocess_dataset.jsonl \
+    --reviewer anthropic --judge openai \
+    --max-prs 10 --name my-first-run
+```
+
+Start with `--max-prs 10` to validate your setup before running the full dataset.
+
+See `pilot/README.md` for instructions on running with real Anthropic and OpenAI adapters.
 
 ## Repository structure
 
@@ -90,13 +118,13 @@ The pilot runs in mock mode by default, with no API costs. See `pilot/README.md`
 
 Five public benchmark datasets are supported out of the box:
 
-| Benchmark | PRs | Languages | Ground truth | Unique value |
-|---|---|---|---|---|
-| **c-CRAB** | 410 | Python | Test-based (deterministic) | Ground truth you can't argue with |
-| **SWE-PRBench** | 350 | Python, JS, Go, TS, Java | Human review comments | Multi-language, contamination-aware |
-| **SWE-CARE** | 671 | Python, Java | Multi-faceted, 9 domains | Category-level analysis |
-| **Greptile** | 50 | 5 languages | Real traced bugs | Bugs that actually shipped |
-| **Martian** | 50 | 5 languages | Golden comments + severity | Pre-labelled severity |
+| Benchmark | PRs | Languages | Ground truth | Unique value | Data readiness |
+|---|---|---|---|---|---|
+| **c-CRAB** | 410 | Python | Test-based (deterministic) | Ground truth you can't argue with | Clone from GitHub |
+| **SWE-PRBench** | 350 | Python, JS, Go, TS, Java | Human review comments | Multi-language, contamination-aware | Auto-downloads from HuggingFace |
+| **SWE-CARE** | 671 | Python, Java | Multi-faceted, 9 domains | Category-level analysis | Auto-downloads from HuggingFace |
+| **Greptile** | 50 | 5 languages | Real traced bugs | Bugs that actually shipped | Manual — scrape from benchmark page |
+| **Martian** | 50 | 5 languages | Golden comments + severity | Pre-labelled severity | Clone repo + fetch diffs via pipeline |
 
 Load any benchmark with `--benchmark`:
 
@@ -104,16 +132,36 @@ Load any benchmark with `--benchmark`:
 python -m pilot.run --benchmark ccrab \
     --benchmark-path /path/to/preprocess_dataset.jsonl \
     --reviewer anthropic --judge openai \
-    --name my-run
+    --max-prs 10 --name my-run
 ```
 
-Or load all available benchmarks at once with `--benchmark all`.
+Use `--max-prs` to test with a small subset before running the full dataset. Or load all available benchmarks at once with `--benchmark all`.
+
+## Getting benchmark data
+
+**c-CRAB** — Clone the dataset repository:
+```bash
+git clone --depth 1 https://github.com/c-CRAB-Benchmark/dataset.git ccrab-dataset
+```
+Then point `--benchmark-path` at `ccrab-dataset/preprocess_dataset.jsonl`.
+
+**SWE-PRBench** — Auto-downloads from HuggingFace on first run. Just install the benchmark dependencies (`pip install -e ".[dev,benchmarks]"`) and run with `--benchmark swe-prbench`.
+
+**SWE-CARE** — Same as SWE-PRBench: auto-downloads from HuggingFace. Run with `--benchmark swe-care`.
+
+**Greptile** — No downloadable dataset. The benchmark at [greptile.com/benchmarks](https://www.greptile.com/benchmarks) publishes results for 50 PRs across 5 repos (Sentry, Cal.com, Grafana, Keycloak, Discourse), with links to each PR on GitHub. The PR diffs and bug descriptions must be scraped from the benchmark page and the linked GitHub PRs. There is no official GitHub repo with the raw data.
+
+**Martian** — Clone the benchmark repository:
+```bash
+git clone --depth 1 https://github.com/withmartian/code-review-benchmark.git martian-benchmark
+```
+The `offline/golden_comments/` directory contains 5 JSON files with human-curated issues and severity labels. However, the PR diffs are **not** included in the repo — they must be fetched from GitHub using the Martian pipeline (`offline/code_review_benchmark/`). This requires a GitHub token and runs a multi-step pipeline: fork PRs, download PR data, extract comments, deduplicate, judge, and export. See their `offline/README.md` for setup.
 
 ## Authentication
 
 Three ways to authenticate LLM calls, no configuration files needed:
 
-**Claude Code (subscription, no API key):**
+**Claude Code (no API key needed):**
 ```bash
 # Uses your logged-in Claude Code session via `claude -p`
 python -m pilot.run --benchmark ccrab \
@@ -145,7 +193,7 @@ python -m pilot.run --reviewer anthropic --judge openai
 Ground truth issues in public benchmarks are not classified by the framework's 15 dimensions. The classification pipeline uses multi-run LLM consensus to classify them:
 
 ```bash
-# Classify with Opus × 3 runs (uses Claude Code subscription)
+# Classify with Opus × 3 runs (uses Claude Code)
 python -m pilot.dimension_pipeline classify \
     --benchmark ccrab \
     --benchmark-path /path/to/data \

@@ -8,9 +8,9 @@ A reference implementation of the measurement framework. The pilot is deliberate
 cd pilot
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,benchmarks]"
 
-# Run in mock mode (no API costs, uses fixtures)
+# Run in mock mode (uses fixtures, no API calls)
 python -m pilot.run --dataset fixtures/sample.jsonl
 
 # Run tests
@@ -19,23 +19,41 @@ python -m pytest tests/ -v
 
 Outputs are written to `results/` as both JSON and Markdown.
 
-## Running with real APIs
+For the full workflow — getting benchmark data, classifying dimensions, and running benchmarks — see the [main README](../README.md#quick-start).
 
-Requires `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` in the environment.
+## Authentication
+
+Three options, no configuration files needed:
+
+**Claude Code (no API key needed):**
+```bash
+python -m pilot.run --benchmark ccrab \
+    --benchmark-path /path/to/data \
+    --reviewer claude-code --judge claude-code
+```
+
+**Anthropic API key:**
+```bash
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+python -m pilot.run --reviewer anthropic --judge anthropic
+```
+
+**OpenAI API key:**
+```bash
+export OPENAI_API_KEY=sk-proj-...
+python -m pilot.run --judge openai
+```
+
+For cross-family evaluation (recommended — judge with a different model family than the reviewer):
 
 ```bash
-# Install API dependencies
-pip install -e ".[dev,api]"
-
-# Set keys
-export ANTHROPIC_API_KEY=...
-export OPENAI_API_KEY=...
-
-# Single Anthropic reviewer + single Anthropic judge
 python -m pilot.run --dataset fixtures/sample.jsonl \
-    --reviewer anthropic \
-    --judge anthropic
+    --reviewer anthropic --judge openai
+```
 
+### Running with a judge panel
+
+```bash
 # Multi-family judge panel (complies with the model family exclusion rule)
 python -m pilot.run --dataset fixtures/sample.jsonl \
     --reviewer anthropic \
@@ -47,8 +65,6 @@ python -m pilot.run --dataset fixtures/sample.jsonl \
     --reviewer anthropic --reviewer-model claude-sonnet-4-6 \
     --judge mock
 ```
-
-**Cost estimate.** Roughly 15K total tokens per reviewer run on the 10-PR fixture (1K input, 500 output per PR). The pilot should cost well under $1 per run at current prices. A full benchmark at 500 PRs with a 3-judge panel will be considerably higher — budget accordingly.
 
 ## Module overview
 
@@ -65,6 +81,10 @@ python -m pilot.run --dataset fixtures/sample.jsonl \
 | `metrics.py` | Precision, recall, F1 per dimension with Wilson score confidence intervals, and dimension classification accuracy |
 | `reporting.py` | JSON and Markdown report generators |
 | `run.py` | Command-line orchestration |
+| `autoresearch.py` | AutoResearch iteration loop for prompt optimisation |
+| `classify.py` | Dimension classifier CLI (AutoResearch-powered) |
+| `dimension_pipeline.py` | Multi-run consensus classification pipeline |
+| `datasets/` | Public benchmark adapters (c-CRAB, SWE-PRBench, SWE-CARE, Greptile, Martian) |
 
 ## Framework mapping
 
@@ -73,7 +93,7 @@ python -m pilot.run --dataset fixtures/sample.jsonl \
 | S2 Dimensions (15) | `schemas.Dimension` enum with `TIER_1/2/3` sets |
 | S3 Change types (6) | `schemas.ChangeType` enum |
 | S4.1 Core metrics | `metrics.compute_metrics` — precision, recall, F1 per dimension |
-| S4.2.1 Severity (1–4) | `schemas.Severity` enum |
+| S4.2.1 Severity (1-4) | `schemas.Severity` enum |
 | S4.2.4 Dimension classification accuracy | Computed by `compute_metrics`, reported by `format_markdown_report` |
 | S4.3 False positive adjudication | Unmatched findings tracked in `MatchingOutcome`; full adjudication protocol is future work |
 | S6 Sycophancy testing | Future work; requires adversarial test case construction and human difficulty calibration |
@@ -91,4 +111,4 @@ python -m pilot.run --dataset fixtures/sample.jsonl \
 
 **Not in scope.** The false positive adjudication protocol, the sycophancy testing protocol, and the multi-model experiment protocol. These are larger components of the framework and are scoped separately from the reference implementation.
 
-The pilot also does not measure annotation cost, does not validate the judge against human assessments, and does not evaluate real-world tool performance. Those are empirical studies that build on the framework; the pilot only demonstrates the framework's executability.
+The pilot does not validate the judge against human assessments and does not evaluate real-world tool performance. Those are empirical studies that build on the framework; the pilot only demonstrates the framework's executability.
