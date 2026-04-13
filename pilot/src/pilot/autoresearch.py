@@ -169,6 +169,33 @@ def load_match_calibration(path: Path) -> list[MatchLabel]:
 # --- LLM client wrappers ------------------------------------------------
 
 
+class ClaudeCodeLLM:
+    """Uses the claude CLI in print mode — authenticates via OAuth token.
+
+    No API key needed. Uses whatever auth the local claude CLI has
+    (typically OAuth from `claude login`). This is the simplest way to
+    use Claude from code when you have Claude Code installed but no
+    separate API key.
+    """
+
+    def __init__(self, model: str = "claude-opus-4-6"):
+        self._model = model
+
+    def complete(self, system: str, user: str) -> str:
+        import subprocess
+        combined = f"{system}\n\n{user}"
+        result = subprocess.run(
+            ["claude", "-p", "--model", self._model],
+            input=combined,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"claude CLI failed: {result.stderr[:500]}")
+        return result.stdout.strip()
+
+
 class AnthropicLLM:
     """Wraps the Anthropic SDK to satisfy the LLMClient protocol."""
 
@@ -181,7 +208,7 @@ class AnthropicLLM:
         response = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            temperature=0.7,  # Some creativity for prompt refinement
+            temperature=0.7,
             system=system,
             messages=[{"role": "user", "content": user}],
         )

@@ -32,6 +32,7 @@ from pathlib import Path
 from pilot.autoresearch import (
     DIMENSION_CLASSIFIER_INITIAL,
     AnthropicLLM,
+    ClaudeCodeLLM,
     LoopResult,
     MockLLM,
     OpenAILLM,
@@ -56,6 +57,9 @@ def cmd_loop(args: argparse.Namespace) -> int:
     if args.dry_run:
         client = MockLLM()
         print("Dry run mode — using mock LLM (no API calls)")
+    elif args.provider == "claude-code":
+        client = ClaudeCodeLLM(model=args.model)
+        print(f"Using claude CLI (OAuth auth, model: {args.model})")
     elif args.provider == "anthropic":
         from anthropic import Anthropic
         api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -108,7 +112,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
     print(f"Loaded prompt (score: {loop_data['best_score']:.3f})")
 
     # Build LLM client
-    if args.provider == "anthropic":
+    if args.provider == "claude-code":
+        client = ClaudeCodeLLM(model=args.model)
+    elif args.provider == "anthropic":
         from anthropic import Anthropic
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
@@ -182,8 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Stop after N iterations without improvement (default: 10)",
     )
     loop_parser.add_argument(
-        "--provider", choices=["anthropic", "openai"], default="anthropic",
-        help="LLM provider for evaluation and refinement",
+        "--provider", choices=["claude-code", "anthropic", "openai"], default="claude-code",
+        help="LLM provider. claude-code uses local CLI with OAuth (no API key needed).",
     )
     loop_parser.add_argument(
         "--model", default="claude-sonnet-4-6",
@@ -218,8 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to the benchmark data",
     )
     apply_parser.add_argument(
-        "--provider", choices=["anthropic", "openai"], default="anthropic",
-        help="LLM provider for classification",
+        "--provider", choices=["claude-code", "anthropic", "openai"], default="claude-code",
+        help="LLM provider. claude-code uses local CLI with OAuth (no API key needed).",
     )
     apply_parser.add_argument(
         "--model", default="claude-sonnet-4-6",
