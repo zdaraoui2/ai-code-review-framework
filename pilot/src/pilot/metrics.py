@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from pilot.matching import MatchingOutcome
 from pilot.schemas import (
+    ClaimedDimensionMetrics,
     Dimension,
     DimensionMetrics,
     GroundTruthIssue,
@@ -203,6 +204,24 @@ def compute_metrics(
                 tp=current.tp, fp=current.fp + 1, fn=current.fn
             )
 
+    # --- Finding-perspective (claimed dimension) attribution ---
+    # Second pass: attribute TPs to the finding's claimed dimension, not the
+    # GT's. This gives an honest answer to "when the reviewer claims dimension
+    # X, how often is it a real issue?" Recall is not meaningful here because
+    # FNs have no claimed dimension.
+    claimed_tp: dict[Dimension, int] = {dim: 0 for dim in Dimension}
+    claimed_fp: dict[Dimension, int] = {dim: 0 for dim in Dimension}
+
+    for pr in prs:
+        outcome = outcomes_by_pr[pr.pr_id]
+        for match in outcome.matches:
+            if match.finding_id is not None:
+                matched_finding = findings_lookup.get(match.finding_id)
+                if matched_finding is not None:
+                    claimed_tp[matched_finding.dimension] += 1
+        for finding in outcome.unmatched_findings:
+            claimed_fp[finding.dimension] += 1
+
     # Build per-dimension metrics
     per_dimension_metrics: list[DimensionMetrics] = []
     total_tp = total_fp = total_fn = 0
@@ -241,6 +260,28 @@ def compute_metrics(
             )
         )
 
+    # Build claimed-dimension metrics
+    claimed_dimension_metrics: list[ClaimedDimensionMetrics] = []
+    for dim in Dimension:
+        dim_claimed_tp = claimed_tp[dim]
+        dim_claimed_fp = claimed_fp[dim]
+        total_claims = dim_claimed_tp + dim_claimed_fp
+        claim_precision = dim_claimed_tp / total_claims if total_claims > 0 else None
+        claim_precision_ci = (
+            wilson_interval(dim_claimed_tp, total_claims) if total_claims > 0 else None
+        )
+        claimed_dimension_metrics.append(
+            ClaimedDimensionMetrics(
+                dimension=dim,
+                tier=tier_of(dim),
+                true_positives=dim_claimed_tp,
+                false_positives=dim_claimed_fp,
+                total_claims=total_claims,
+                precision=claim_precision,
+                precision_ci=claim_precision_ci,
+            )
+        )
+
     # Aggregate
     agg_counts = _Counts(tp=total_tp, fp=total_fp, fn=total_fn)
     agg_p = _precision(agg_counts)
@@ -259,12 +300,41 @@ def compute_metrics(
         wilson_interval(correct_dimension, matched_total) if matched_total > 0 else None
     )
 
+    # ── Visible recall ──────────────────────────────────────────────
+    # Collect all excluded GT issue IDs across truncated PRs. These are
+    # GT issues the reviewer could not see because the diff was truncated.
+    # They still count toward total recall (aggregate_recall above) but
+    # are excluded from visible recall.
+    all_excluded_gt_ids: set[str] = set()
+    truncated_pr_count = sum(1 for pr_item in prs if pr_item.truncated)
+    for pr_item in prs:
+        if pr_item.truncated and pr_item.excluded_gt_ids:
+            all_excluded_gt_ids.update(pr_item.excluded_gt_ids)
+
+    visible_recall: float | None = None
+    visible_recall_ci_val: tuple[float, float] | None = None
+
+    if all_excluded_gt_ids:
+        # Recount FNs excluding the invisible GT issues.
+        visible_fn = total_fn
+        for pr_item in prs:
+            outcome = outcomes_by_pr[pr_item.pr_id]
+            for match in outcome.matches:
+                if match.finding_id is None and match.ground_truth_issue_id in all_excluded_gt_ids:
+                    visible_fn -= 1
+
+        visible_total = total_tp + visible_fn
+        if visible_total > 0:
+            visible_recall = total_tp / visible_total
+            visible_recall_ci_val = wilson_interval(total_tp, visible_total)
+
     return MetricsReport(
         reviewer_model=reviewer_model,
         judge_panel=judge_panel,
         evaluation_set=evaluation_set,
         n_prs=len(prs),
         per_dimension=per_dimension_metrics,
+        per_dimension_by_claim=claimed_dimension_metrics,
         total_true_positives=total_tp,
         total_false_positives=total_fp,
         total_false_negatives=total_fn,
@@ -273,6 +343,10 @@ def compute_metrics(
         aggregate_f1=agg_f1,
         aggregate_precision_ci=agg_p_ci,
         aggregate_recall_ci=agg_r_ci,
+        visible_recall=visible_recall,
+        visible_recall_ci=visible_recall_ci_val,
+        truncated_pr_count=truncated_pr_count,
+        excluded_gt_issue_count=len(all_excluded_gt_ids),
         dimension_classification_tp=matched_total,
         dimension_classification_accuracy=dim_accuracy,
         dimension_classification_accuracy_ci=dim_accuracy_ci,

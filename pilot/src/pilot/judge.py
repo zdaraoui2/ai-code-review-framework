@@ -36,6 +36,16 @@ class Judge(ABC):
     def model_name(self) -> str:
         """Identifier for the judge model."""
 
+    @property
+    @abstractmethod
+    def family(self) -> str:
+        """Model family identifier (e.g., 'anthropic', 'openai').
+
+        Used by JudgePanel to enforce the family exclusion rule from
+        Section 8.1.1: all judges on a panel must come from different
+        model families.
+        """
+
     @abstractmethod
     def match_findings_to_ground_truth(
         self,
@@ -55,8 +65,14 @@ class MockJudge(Judge):
     canonical mapping between ground truth issues and findings.
     """
 
-    def __init__(self, fixture_path: Path, model_name: str = "mock-judge"):
+    def __init__(
+        self,
+        fixture_path: Path,
+        model_name: str = "mock-judge",
+        family: str = "mock",
+    ):
         self._model_name = model_name
+        self._family = family
         self._matches_by_gt: dict[str, MatchResult] = {}
         for match in load_mock_judge_matches(fixture_path):
             self._matches_by_gt[match.ground_truth_issue_id] = match
@@ -64,6 +80,10 @@ class MockJudge(Judge):
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    @property
+    def family(self) -> str:
+        return self._family
 
     def match_findings_to_ground_truth(
         self,
@@ -101,6 +121,10 @@ class AnthropicJudge(Judge):
     @property
     def model_name(self) -> str:
         return f"anthropic/{self._model}"
+
+    @property
+    def family(self) -> str:
+        return "anthropic"
 
     def match_findings_to_ground_truth(
         self,

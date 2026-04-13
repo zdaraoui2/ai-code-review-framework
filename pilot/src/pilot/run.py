@@ -65,7 +65,9 @@ def build_judge(args: argparse.Namespace) -> Judge:
     for i, backend in enumerate(backends):
         if backend == "mock":
             fixture = Path(args.judge_fixture)
-            judges.append(MockJudge(fixture, model_name=f"mock-judge-{i+1}"))
+            judges.append(
+                MockJudge(fixture, model_name=f"mock-judge-{i+1}", family=f"mock-{i+1}")
+            )
         elif backend == "anthropic":
             from anthropic import Anthropic
 
@@ -214,6 +216,16 @@ def run_pipeline(
         usage_metadata["reviewer_calls"] = str(reviewer.usage.call_count)
         if reviewer.usage.errors:
             usage_metadata["reviewer_errors"] = str(reviewer.usage.errors)
+        # Severity coercion tracking — flags data quality issues in LLM output.
+        if hasattr(reviewer.usage, "severity_coercions"):
+            usage_metadata["severity_coercion_count"] = str(
+                reviewer.usage.severity_coercions
+            )
+            usage_metadata["severity_coercion_failures"] = str(
+                reviewer.usage.severity_coercion_failures
+            )
+            coercion_rate = reviewer.usage.severity_coercion_rate
+            usage_metadata["severity_coercion_rate"] = f"{coercion_rate:.2%}"
 
     if isinstance(judge, JudgePanel):
         for i, j in enumerate(judge.judges):
